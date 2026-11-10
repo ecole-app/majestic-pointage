@@ -1,0 +1,51 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function isManager() {
+      return signedIn() && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'manager';
+    }
+    function noSettingsYet() { return !exists(/databases/$(database)/documents/settings/main); }
+
+    match /users/{uid} {
+      allow read: if signedIn() && (request.auth.uid == uid || isManager());
+      allow create: if isManager()
+        || (request.auth.uid == uid && request.resource.data.role == 'manager' && noSettingsYet())
+        // salarié invité : l'invitation doit exister, être inutilisée et correspondre au prénom
+        || (request.auth.uid == uid && request.resource.data.role == 'employee'
+            && get(/databases/$(database)/documents/invites/$(request.resource.data.inviteToken)).data.used == false
+            && get(/databases/$(database)/documents/invites/$(request.resource.data.inviteToken)).data.firstName == request.resource.data.firstName);
+      allow update, delete: if isManager();
+    }
+    match /settings/main {
+      allow read: if signedIn();
+      allow create: if signedIn() && noSettingsYet();
+      allow update: if isManager();
+    }
+    match /punches/{id} {
+      allow read: if isManager() || (signedIn() && resource.data.uid == request.auth.uid);
+      // le salarié pointe son arrivée : horodatage serveur obligatoire
+      allow create: if isManager()
+        || (signedIn() && request.resource.data.uid == request.auth.uid
+            && request.resource.data.end == null
+            && request.resource.data.start == request.time);
+      // le salarié pointe son départ (uniquement le champ "end", horodatage serveur)
+      allow update: if isManager()
+        || (signedIn() && resource.data.uid == request.auth.uid && resource.data.end == null
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['end'])
+            && request.resource.data.end == request.time);
+      allow delete: if isManager();
+    }
+    match /invites/{id} {
+      allow get: if true;                 // lecture par code uniquement (pas de liste)
+      allow list, create, delete: if isManager();
+      allow update: if isManager()
+        || (signedIn() && resource.data.used == false
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['used','usedBy']));
+    }
+    match /deliverers/{id} { allow read, write: if isManager(); }
+    match /deliveries/{id} { allow read, write: if isManager(); }
+    match /logs/{id}       { allow read, write: if isManager(); }
+    match /reports/{id}    { allow read: if isManager(); }
+  }
+}

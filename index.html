@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#14110f">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon.svg">
+<title>Pointage Majestic</title>
+<style>
+:root{--bg:#14110f;--card:#211c18;--line:#3a322b;--tx:#f3ede4;--mu:#a39886;--gold:#e8a93b;--ok:#4caf7a;--ko:#e5604d}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:16px/1.4 system-ui,sans-serif;padding-bottom:40px}
+header{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg);z-index:5}
+header b{color:var(--gold)}main{max-width:760px;margin:0 auto;padding:16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;margin-bottom:12px}
+input,select,button{font:inherit;color:var(--tx);background:#2b241f;border:1px solid var(--line);border-radius:10px;padding:10px 12px;width:100%}
+button{cursor:pointer;width:auto}button.pri{background:var(--gold);color:#14110f;font-weight:700;border:0}
+button.big{width:100%;padding:22px;font-size:22px;border-radius:16px}button.ko{background:var(--ko);color:#fff;border:0}button.sm{padding:5px 9px;font-size:13px}
+label{display:block;color:var(--mu);font-size:13px;margin:10px 0 4px}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.row>*{flex:1}
+nav{display:flex;gap:6px;overflow-x:auto;margin-bottom:12px}nav button{white-space:nowrap}nav button.on{background:var(--gold);color:#14110f;border:0;font-weight:700}
+table{width:100%;border-collapse:collapse;font-size:14px}td,th{padding:7px 4px;border-bottom:1px solid var(--line);text-align:left}th{color:var(--mu);font-weight:500}
+.mu{color:var(--mu);font-size:13px}.ok{color:var(--ok)}.ko{color:var(--ko)}.r{text-align:right}h2{margin:4px 0 10px;font-size:18px}
+dialog{background:var(--card);color:var(--tx);border:1px solid var(--line);border-radius:14px;width:min(420px,92vw)}dialog::backdrop{background:#000a}
+.clock{font-size:44px;text-align:center;font-weight:700;margin:6px 0}#msg{position:fixed;bottom:12px;left:12px;right:12px;text-align:center;z-index:9}
+#msg span{background:#000;border:1px solid var(--gold);padding:8px 14px;border-radius:10px;display:inline-block}
+</style>
+</head>
+<body>
+<header><b>🕒 Pointage Majestic</b><span id="who" class="mu"></span></header>
+<main id="app"></main>
+<dialog id="dlg"></dialog>
+<div id="msg"></div>
+
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<script src="firebase-config.js"></script>
+<script>
+firebase.initializeApp(FIREBASE_CONFIG);
+const auth=firebase.auth(), db=firebase.firestore(), SRV=firebase.firestore.FieldValue.serverTimestamp, TS=firebase.firestore.Timestamp;
+const $=s=>document.querySelector(s), pad=n=>String(n).padStart(2,'0');
+let busy=false, me=null, settings={dayCutoffHour:3,managerEmail:''}, unsubs=[];
+let S={tab:'punch',ym:'',users:[],dels:[],punches:[],deliveries:[],invites:[]};
+
+/* ---------- utilitaires ---------- */
+const slug=s=>s.trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-z0-9]/g,'');
+const emailOf=n=>slug(n)+'@pointage.local';
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+function toast(t){const m=$('#msg');m.innerHTML='<span>'+esc(t)+'</span>';clearTimeout(toast.t);toast.t=setTimeout(()=>m.innerHTML='',3500)}
+// Jour de service : une session commencée avant 3h du matin compte pour la veille
+function dayKey(d){const x=new Date(d.getTime()-settings.dayCutoffHour*3600000);return `${x.getFullYear()}-${pad(x.getMonth()+1)}-${pad(x.getDate())}`}
+const curYM=()=>dayKey(new Date()).slice(0,7);
+const fmtT=d=>d?pad(d.getHours())+':'+pad(d.getMinutes()):'—';
+const fmtDT=d=>d?`${pad(d.getDate())}/${pad(d.getMonth()+1)} ${fmtT(d)}`:'—';
+const fmtD=k=>{const [y,m,d]=k.split('-');return new Date(y,m-1,d).toLocaleDateString('fr-FR',{weekday:'short',day:'2-digit',month:'2-digit'})};
+const fmtH=ms=>{const m=Math.round(ms/60000);return Math.floor(m/60)+'h'+pad(m%60)};
+const eur=n=>(Math.round(n*100)/100).toLocaleString('fr-FR',{style:'currency',currency:'EUR'});
+const toLocalInput=d=>d?`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`:'';
+const dur=p=>p.end?p.end.toDate()-p.start.toDate():0;
+const userName=id=>(S.users.find(u=>u.id===id)||{}).firstName||'?';
+async function log(action,detail){try{await db.collection('logs').add({by:me.firstName,action,detail,at:SRV()})}catch(e){}}
+function monthRange(ym){return [ym+'-01',ym+'-31']}
+
+/* ---------- authentification ---------- */
+auth.onAuthStateChanged(async u=>{
+  if(busy)return;
+  unsubs.forEach(f=>f());unsubs=[];me=null;$('#who').textContent='';
+  if(!u){return renderLogin()}
+  try{
+    const [us,st]=await Promise.all([db.collection('users').doc(u.uid).get(),db.collection('settings').doc('main').get()]);
+    if(st.exists)settings={...settings,...st.data()};
+    if(!us.exists||us.data().active===false){await auth.signOut();toast('Compte désactivé ou introuvable');return}
+    me={id:u.uid,...us.data()};
+  }catch(e){toast('Erreur de chargement : '+e.message);return}
+  $('#who').innerHTML=esc(me.firstName)+' · <a href="#" onclick="logout();return false" style="color:var(--gold)">quitter</a>';
+  S.ym=curYM();S.tab=me.role==='manager'?'punch':'mine';
+  listen();
+});
+const logout=()=>auth.signOut();
+
+function renderLogin(setup){
+  $('#app').innerHTML=`<div class="card"><h2>${setup?'Première installation — compte gérant':'Connexion'}</h2>
+  <label>Prénom</label><input id="l_n" autocomplete="username" autocapitalize="words">
+  <label>Mot de passe${setup?' (6 caractères min.)':''}</label><input id="l_p" type="password" autocomplete="current-password">
+  ${setup?'<label>E-mail du gérant (réception des rapports)</label><input id="l_m" type="email">':''}
+  <p><button class="pri" style="width:100%" onclick="${setup?'doSetup()':'doLogin()'}">${setup?'Créer le compte gérant':'Se connecter'}</button></p>
+  <p class="mu" style="text-align:center"><a href="#" style="color:var(--gold)" onclick="renderInvite();return false">J’ai reçu une invitation (première connexion)</a></p>
+  <p class="mu" style="text-align:center"><a href="#" style="color:var(--mu)" onclick="renderLogin(${!setup});return false">${setup?'← Retour':'Première installation du gérant ?'}</a></p></div>`;
+}
+const INV_ALPHA='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const newToken=()=>Array.from(crypto.getRandomValues(new Uint8Array(8)),b=>INV_ALPHA[b%INV_ALPHA.length]).join('');
+const inviteFromUrl=()=>{const m=(location.search+location.hash).match(/(?:i=|invite=)([A-Z0-9]{8})/i);return m?m[1].toUpperCase():''};
+let INV=null;
+function renderInvite(){
+  INV=null;
+  $('#app').innerHTML=`<div class="card"><h2>Première connexion</h2><p class="mu">Saisis le code reçu du gérant pour créer ton accès.</p>
+  <label>Code d’invitation</label><input id="i_c" autocapitalize="characters" maxlength="8" value="${inviteFromUrl()}" style="letter-spacing:3px;text-transform:uppercase">
+  <p><button class="pri" style="width:100%" onclick="checkInvite()">Continuer</button></p>
+  <p class="mu" style="text-align:center"><a href="#" style="color:var(--mu)" onclick="renderLogin();return false">← Retour</a></p></div>`;
+  if(inviteFromUrl())checkInvite();
+}
+async function checkInvite(){
+  const t=$('#i_c').value.trim().toUpperCase();if(t.length!==8)return toast('Code à 8 caractères');
+  try{
+    const d=await db.collection('invites').doc(t).get();
+    if(!d.exists||d.data().used)return toast('Invitation invalide ou déjà utilisée');
+    INV={id:t,...d.data()};
+  }catch(e){return toast('Invitation invalide')}
+  $('#app').innerHTML=`<div class="card"><h2>Bienvenue ${esc(INV.firstName)} 👋</h2><p class="mu">${esc(INV.code)} ${esc(INV.profile)}</p>
+  <label>Identifiant (ton prénom)</label><input value="${esc(INV.firstName)}" disabled>
+  <label>Choisis ton mot de passe (6 caractères min.)</label><input id="i_p" type="password" autocomplete="new-password">
+  <label>Confirme le mot de passe</label><input id="i_p2" type="password" autocomplete="new-password">
+  <p><button class="pri" style="width:100%" onclick="acceptInvite()">Créer mon accès</button></p></div>`;
+}
+async function acceptInvite(){
+  const p=$('#i_p').value;if(p.length<6)return toast('Mot de passe : 6 caractères min.');if(p!==$('#i_p2').value)return toast('Les mots de passe diffèrent');
+  let cred;
+  try{
+    busy=true;cred=await auth.createUserWithEmailAndPassword(emailOf(INV.firstName),p);
+    await db.collection('users').doc(cred.user.uid).set({role:'employee',firstName:INV.firstName,code:INV.code,profile:INV.profile,rate:INV.rate||0,active:true,inviteToken:INV.id});
+    await db.collection('invites').doc(INV.id).update({used:true,usedBy:cred.user.uid});
+    busy=false;location.reload();
+  }catch(e){busy=false;toast('Impossible : '+e.message);try{await auth.currentUser?.delete()}catch(_){}}
+}
+async function doLogin(){
+  try{await auth.signInWithEmailAndPassword(emailOf($('#l_n').value),$('#l_p').value)}
+  catch(e){toast('Prénom ou mot de passe incorrect')}
+}
+async function doSetup(){
+  const n=$('#l_n').value.trim(),p=$('#l_p').value,m=$('#l_m').value.trim();
+  if(!n||p.length<6||!m)return toast('Remplis tout (mot de passe 6 car. min.)');
+  try{
+    busy=true;const c=await auth.createUserWithEmailAndPassword(emailOf(n),p);
+    await db.collection('users').doc(c.user.uid).set({role:'manager',firstName:n,code:'',profile:'Gérant',rate:0,active:true});
+    await db.collection('settings').doc('main').set({managerEmail:m,dayCutoffHour:3});
+    busy=false;location.reload();
+  }catch(e){busy=false;toast('Impossible : '+e.message);try{await auth.currentUser?.delete()}catch(_){}}
+}
+
+/* ---------- données temps réel ---------- */
+function listen(){
+  const isM=me.role==='manager';
+  if(isM){
+    unsubs.push(db.collection('users').onSnapshot(s=>{S.users=s.docs.map(d=>({id:d.id,...d.data()}));render()}));
+    unsubs.push(db.collection('invites').onSnapshot(s=>{S.invites=s.docs.map(d=>({id:d.id,...d.data()}));if(S.tab==='team')render()}));
+    unsubs.push(db.collection('deliverers').onSnapshot(s=>{S.dels=s.docs.map(d=>({id:d.id,...d.data()}));render()}));
+    watchMonth();
+  }else{
+    S.users=[me];
+    unsubs.push(db.collection('punches').where('uid','==',me.id).onSnapshot(s=>{S.punches=s.docs.map(d=>({id:d.id,...d.data()}));render()}));
+  }
+  render();
+}
+let monthUnsubs=[];
+function watchMonth(){
+  monthUnsubs.forEach(f=>f());const [a,b]=monthRange(S.ym);
+  monthUnsubs=[
+    db.collection('punches').where('day','>=',a).where('day','<=',b).onSnapshot(s=>{S.punches=s.docs.map(d=>({id:d.id,...d.data()}));render()}),
+    db.collection('deliveries').where('day','>=',a).where('day','<=',b).onSnapshot(s=>{S.deliveries=s.docs.map(d=>({id:d.id,...d.data()}));render()})];
+  unsubs.push(()=>monthUnsubs.forEach(f=>f()));
+}
+
+/* ---------- rendu ---------- */
+function render(){
+  if(!me)return;
+  if(me.role==='manager'){
+    const tabs=[['punch','Pointages'],['team','Équipe'],['deliv','Livraisons'],['recap','Récap'],['set','Réglages']];
+    $('#app').innerHTML=`<nav>${tabs.map(([k,l])=>`<button class="${S.tab===k?'on':''}" onclick="S.tab='${k}';render()">${l}</button>`).join('')}</nav><div id="v"></div>`;
+    ({punch:vPunch,team:vTeam,deliv:vDeliv,recap:vRecap,set:vSet})[S.tab]();
+  }else{vMine()}
+}
+const monthPicker=()=>`<div class="row" style="margin-bottom:10px"><input type="month" value="${S.ym}" onchange="S.ym=this.value||curYM();watchMonth();render()"></div>`;
+if(false){}
+
+/* --- salarié --- */
+let tick;
+function vMine(){
+  const open=S.punches.find(p=>!p.end);
+  const mine=S.punches.filter(p=>p.day.startsWith(S.ym)).sort((a,b)=>b.start.seconds-a.start.seconds);
+  const total=mine.reduce((t,p)=>t+dur(p),0);
+  $('#app').innerHTML=`<div class="card"><div class="clock" id="clk"></div>
+  <p class="mu" style="text-align:center">${open?'En service depuis '+fmtT(open.start.toDate()):'Hors service'} · jour de service ${fmtD(dayKey(new Date()))}</p>
+  <button class="big ${open?'ko':'pri'}" onclick="${open?`punchOut('${open.id}')`:'punchIn()'}">${open?'🔴 Pointer le départ':'🟢 Pointer l’arrivée'}</button></div>
+  <div class="card"><h2>Mes pointages</h2><input type="month" value="${S.ym}" onchange="S.ym=this.value||curYM();render()" style="margin-bottom:8px">
+  <table><tr><th>Jour</th><th>Arrivée</th><th>Départ</th><th class="r">Durée</th></tr>
+  ${mine.map(p=>`<tr><td>${fmtD(p.day)}</td><td>${fmtT(p.start.toDate())}</td><td>${p.end?fmtT(p.end.toDate()):'<span class="ok">en cours</span>'}</td><td class="r">${p.end?fmtH(dur(p)):''}${p.corrected?' <span class="mu" title="corrigé par le gérant">✎</span>':''}</td></tr>`).join('')||'<tr><td colspan=4 class="mu">Rien ce mois-ci</td></tr>'}
+  </table><p class="r"><b>Total : ${fmtH(total)}</b></p>
+  <p class="mu">Une erreur ? Demande au gérant de corriger.</p></div>`;
+  clearInterval(tick);const c=()=>{const e=$('#clk');if(e)e.textContent=new Date().toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit',second:'2-digit'})};c();tick=setInterval(c,1000);
+}
+async function punchIn(){
+  try{await db.collection('punches').add({uid:me.id,day:dayKey(new Date()),start:SRV(),end:null});toast('Arrivée pointée ✔')}catch(e){toast('Erreur : '+e.message)}
+}
+async function punchOut(id){
+  try{await db.collection('punches').doc(id).update({end:SRV()});toast('Départ pointé ✔')}catch(e){toast('Erreur : '+e.message)}
+}
+
+/* --- gérant : pointages --- */
+function vPunch(){
+  const emps=S.users.filter(u=>u.role==='employee');
+  const inNow=S.punches.filter(p=>!p.end);
+  const list=[...S.punches].sort((a,b)=>b.start.seconds-a.start.seconds);
+  $('#v').innerHTML=`<div class="card"><h2>En service maintenant</h2>${inNow.map(p=>`<div>🟢 <b>${esc(userName(p.uid))}</b> depuis ${fmtT(p.start.toDate())}</div>`).join('')||'<span class="mu">Personne</span>'}</div>
+  ${monthPicker()}
+  <div class="card"><div class="row"><h2 style="flex:3;margin:0">Pointages</h2><button class="pri sm" onclick="editPunch()">+ Ajouter</button></div>
+  <table><tr><th>Jour</th><th>Salarié</th><th>Arr.</th><th>Dép.</th><th class="r">Durée</th><th></th></tr>
+  ${list.map(p=>`<tr><td>${fmtD(p.day)}</td><td>${esc(userName(p.uid))}</td><td>${fmtT(p.start.toDate())}</td><td>${p.end?fmtT(p.end.toDate()):'<span class="ok">en cours</span>'}</td><td class="r">${p.end?fmtH(dur(p)):''}${p.corrected?' <span class="ko" title="corrigé">●</span>':''}</td><td class="r"><button class="sm" onclick="editPunch('${p.id}')">✎</button></td></tr>`).join('')||'<tr><td colspan=6 class="mu">Aucun pointage</td></tr>'}</table></div>`;
+}
+function editPunch(id){
+  const p=id?S.punches.find(x=>x.id===id):null;
+  const emps=S.users.filter(u=>u.role==='employee');
+  $('#dlg').innerHTML=`<h2>${p?'Modifier':'Ajouter'} un pointage</h2>
+  <label>Salarié</label><select id="e_u" ${p?'disabled':''}>${emps.map(u=>`<option value="${u.id}" ${p&&p.uid===u.id?'selected':''}>${esc(u.firstName)}</option>`).join('')}</select>
+  <label>Arrivée</label><input id="e_s" type="datetime-local" value="${p?toLocalInput(p.start.toDate()):toLocalInput(new Date())}">
+  <label>Départ (vide = toujours en service)</label><input id="e_e" type="datetime-local" value="${p&&p.end?toLocalInput(p.end.toDate()):''}">
+  <div class="row" style="margin-top:14px"><button class="pri" onclick="savePunch('${id||''}')">Enregistrer</button>${p?`<button class="ko" onclick="delPunch('${id}')">Supprimer</button>`:''}<button onclick="$('#dlg').close()">Annuler</button></div>`;
+  $('#dlg').showModal();
+}
+async function savePunch(id){
+  const s=$('#e_s').value,e=$('#e_e').value;if(!s)return toast('Arrivée requise');
+  const sd=new Date(s),ed=e?new Date(e):null;if(ed&&ed<=sd)return toast('Le départ doit être après l’arrivée');
+  const data={start:TS.fromDate(sd),end:ed?TS.fromDate(ed):null,day:dayKey(sd),editedBy:me.firstName,corrected:true};
+  const after={s:fmtDT(sd),e:ed?fmtDT(ed):'en service'};
+  try{
+    if(id){const p=S.punches.find(x=>x.id===id);const before={s:fmtDT(p.start.toDate()),e:p.end?fmtDT(p.end.toDate()):'en service'};
+      await db.collection('punches').doc(id).update(data);log('modif pointage',{name:userName(p.uid),day:data.day,before,after})}
+    else{data.uid=$('#e_u').value;await db.collection('punches').add(data);log('ajout pointage',{name:userName(data.uid),day:data.day,after})}
+    $('#dlg').close();toast('Enregistré ✔');
+  }catch(err){toast('Erreur : '+err.message)}
+}
+async function delPunch(id){if(!confirm('Supprimer ce pointage ?'))return;const p=S.punches.find(x=>x.id===id);await db.collection('punches').doc(id).delete();log('suppr pointage',{name:userName(p.uid),day:p.day,before:{s:fmtDT(p.start.toDate()),e:p.end?fmtDT(p.end.toDate()):'en service'}});$('#dlg').close()}
+
+/* --- gérant : équipe --- */
+function vTeam(){
+  const emps=S.users.filter(u=>u.role==='employee'),dels=S.dels;
+  $('#v').innerHTML=`<div class="card"><h2>Ajouter</h2>
+  <label>Type</label><select id="t_type" onchange="$('#t_rate').style.display=this.value==='employee'?'block':'none'"><option value="employee">Salarié (pointe lui-même, reçoit une invitation)</option><option value="deliverer">Livreur (le gérant saisit ses courses)</option></select>
+  <label>Prénom</label><input id="t_n">  <div class="row"><div><label>Code profil</label><input id="t_c" inputmode="numeric" placeholder="1279"></div><div><label>Profil</label><input id="t_pr" placeholder="Employé polyvalent"></div><div id="t_rate"><label>Taux horaire €</label><input id="t_r" type="number" step="0.01" placeholder="12.00"></div></div>
+  <p><button class="pri" onclick="addMember()">Créer / envoyer l’invitation</button></p></div>
+  ${S.invites.filter(i=>!i.used).length?`<div class="card"><h2>Invitations en attente</h2>${S.invites.filter(i=>!i.used).map(i=>`<div class="row" style="margin-bottom:6px"><span style="flex:2"><b>${esc(i.firstName)}</b> <span class="mu">${esc(i.profile)}</span></span><button class="sm" onclick="shareInvite('${i.id}')">Envoyer</button><button class="sm" onclick="delInvite('${i.id}')">✕</button></div>`).join('')}</div>`:''}
+  <div class="card"><h2>Salariés</h2><table><tr><th>Prénom</th><th>Profil</th><th class="r">€/h</th><th></th></tr>
+  ${emps.map(u=>`<tr style="${u.active===false?'opacity:.45':''}"><td>${esc(u.firstName)}</td><td>${esc(u.code)} ${esc(u.profile)}</td><td class="r">${u.rate??0}</td><td class="r"><button class="sm" onclick="editMember('users','${u.id}')">✎</button></td></tr>`).join('')||'<tr><td colspan=4 class="mu">Aucun</td></tr>'}</table></div>
+  <div class="card"><h2>Livreurs</h2><table>${dels.map(u=>`<tr style="${u.active===false?'opacity:.45':''}"><td>${esc(u.firstName)}</td><td>${esc(u.code)} ${esc(u.profile)}</td><td class="r"><button class="sm" onclick="editMember('deliverers','${u.id}')">✎</button></td></tr>`).join('')||'<tr><td class="mu">Aucun</td></tr>'}</table></div>`;
+}
+async function addMember(){
+  const type=$('#t_type').value,n=$('#t_n').value.trim(),code=$('#t_c').value.trim(),pr=$('#t_pr').value.trim()||(type==='deliverer'?'Livreur':'Employé polyvalent'),rate=parseFloat($('#t_r').value)||0;
+  if(!n)return toast('Prénom requis');
+  if(S.users.concat(S.dels).some(u=>slug(u.firstName)===slug(n)))return toast('Ce prénom existe déjà (ajoute une initiale)');
+  try{
+    if(type==='deliverer'){await db.collection('deliverers').add({firstName:n,code,profile:pr,active:true});}
+    else{
+      if(S.invites.some(i=>!i.used&&slug(i.firstName)===slug(n)))return toast('Une invitation existe déjà pour ce prénom');
+      const id=newToken();
+      await db.collection('invites').doc(id).set({firstName:n,code,profile:pr,rate,used:false,createdAt:SRV()});
+      log('invitation',{n,code});toast('Invitation créée ✔');return shareInvite(id,{firstName:n});
+    }
+    log('création '+type,{n,code});toast('Créé ✔');vTeam();
+  }catch(e){toast('Erreur : '+e.message)}
+}
+function inviteLink(id){return location.href.split('#')[0].split('?')[0]+'?i='+id}
+function shareInvite(id,fallback){
+  const i=S.invites.find(x=>x.id===id)||fallback||{};
+  const msg=`Salut ${i.firstName||''}, voici ton invitation Pointage Majestic.\nCode : ${id}\nLien : ${inviteLink(id)}\nTon identifiant sera ton prénom ; tu choisis ton mot de passe à la première connexion.`;
+  $('#dlg').innerHTML=`<h2>Invitation pour ${esc(i.firstName||'')}</h2><p class="mu">Envoie ce message au salarié :</p>
+  <textarea id="inv_t" rows="6" style="width:100%;background:#2b241f;color:var(--tx);border:1px solid var(--line);border-radius:10px;padding:10px">${esc(msg)}</textarea>
+  <div class="row" style="margin-top:12px"><button class="pri" onclick="copyInv()">Copier</button><a href="https://wa.me/?text=${encodeURIComponent(msg)}" target="_blank" rel="noopener"><button style="width:100%">WhatsApp</button></a><button onclick="$('#dlg').close()">Fermer</button></div>`;
+  $('#dlg').showModal();
+}
+async function copyInv(){const t=$('#inv_t');t.select();try{await navigator.clipboard.writeText(t.value);toast('Copié ✔')}catch(e){document.execCommand('copy');toast('Copié ✔')}}
+async function delInvite(id){if(confirm('Annuler cette invitation ?')){await db.collection('invites').doc(id).delete();log('suppr invitation',{id})}}
+function editMember(col,id){
+  const u=(col==='users'?S.users:S.dels).find(x=>x.id===id);
+  $('#dlg').innerHTML=`<h2>${esc(u.firstName)}</h2><label>Code profil</label><input id="m_c" value="${esc(u.code)}"><label>Profil</label><input id="m_p" value="${esc(u.profile)}">
+  ${col==='users'?`<label>Taux horaire €</label><input id="m_r" type="number" step="0.01" value="${u.rate||0}">`:''}
+  <label>Actif</label><select id="m_a"><option value="1" ${u.active!==false?'selected':''}>Oui</option><option value="0" ${u.active===false?'selected':''}>Non (ne peut plus se connecter)</option></select>
+  <div class="row" style="margin-top:14px"><button class="pri" onclick="saveMember('${col}','${id}')">Enregistrer</button><button onclick="$('#dlg').close()">Annuler</button></div>`;
+  $('#dlg').showModal();
+}
+async function saveMember(col,id){
+  const d={code:$('#m_c').value.trim(),profile:$('#m_p').value.trim(),active:$('#m_a').value==='1'};if($('#m_r'))d.rate=parseFloat($('#m_r').value)||0;
+  await db.collection(col).doc(id).update(d);log('modif membre',{col,id});$('#dlg').close();toast('Enregistré ✔');
+}
+
+/* --- gérant : livraisons (mode saisie / mode rapport) --- */
+const CH={dishop:'Dishop',uber:'Uber',phone:'Téléphone'};
+const uberPct=()=>settings.uberRate??36;
+function dStats(list){const r={dishop:{n:0,s:0},uber:{n:0,s:0},phone:{n:0,s:0}};list.forEach(x=>{const c=r[x.channel]||r.phone;c.n++;c.s+=x.amount});
+  const gross=r.dishop.s+r.uber.s+r.phone.s,fee=r.uber.s*uberPct()/100;return{...r,gross,fee,net:gross-fee,n:r.dishop.n+r.uber.n+r.phone.n}}
+const statTable=st=>`<table>${Object.keys(CH).map(k=>`<tr><td>${CH[k]}</td><td class="mu">${st[k].n} course(s)</td><td class="r">${eur(st[k].s)}</td></tr>`).join('')}
+  <tr><td>Brut</td><td></td><td class="r">${eur(st.gross)}</td></tr><tr><td>Commission Uber (${uberPct()} %)</td><td></td><td class="r ko">−${eur(st.fee)}</td></tr>
+  <tr><th>Total net</th><th></th><th class="r">${eur(st.net)}</th></tr></table>`;
+S.dmode='saisie';S.dday='';
+function vDeliv(){
+  if(!S.dday)S.dday=dayKey(new Date());
+  const dn=id=>(S.dels.find(d=>d.id===id)||{}).firstName||'?';
+  const dayList=S.deliveries.filter(x=>x.day===S.dday);
+  const head=`<nav><button class="${S.dmode==='saisie'?'on':''}" onclick="S.dmode='saisie';render()">✍ Saisie</button><button class="${S.dmode==='rapport'?'on':''}" onclick="S.dmode='rapport';render()">📊 Rapport</button></nav>
+  <div class="card"><label>Jour de service</label><input type="date" value="${S.dday}" onchange="S.dday=this.value||dayKey(new Date());S.ym=S.dday.slice(0,7);watchMonth();render()"></div>`;
+  if(S.dmode==='saisie'){
+    const act=S.dels.filter(d=>d.active!==false);
+    $('#v').innerHTML=head+(act.map(d=>{const l=dayList.filter(x=>x.delivererId===d.id),st=dStats(l);
+      return `<div class="card"><div class="row"><h2 style="margin:0;flex:2">${esc(d.firstName)} <span class="mu">${esc(d.code)}</span></h2><b style="text-align:right">${eur(st.net)} net</b></div>
+      <label>Montant € de la course</label><input id="a_${d.id}" type="number" step="0.01" inputmode="decimal" placeholder="0.00">
+      <div class="row" style="margin-top:10px"><button class="big pri" onclick="addDelivery('dishop','${d.id}')">Dishop</button><button class="big pri" onclick="addDelivery('uber','${d.id}')">Uber</button><button class="big pri" onclick="addDelivery('phone','${d.id}')">Téléphone</button></div>
+      <p class="mu">${st.n} course(s) aujourd’hui</p>
+      <table>${[...l].sort((a,b)=>(b.at||0)-(a.at||0)).map(x=>`<tr><td>${CH[x.channel]||'—'}</td><td class="r">${eur(x.amount)}</td><td class="r"><button class="sm" onclick="delDelivery('${x.id}')">✕</button></td></tr>`).join('')}</table></div>`}).join('')||'<div class="card mu">Aucun livreur : ajoutes-en un dans Équipe.</div>');
+  }else{
+    $('#v').innerHTML=head+`${S.dels.map(d=>({d,l:dayList.filter(x=>x.delivererId===d.id)})).filter(o=>o.l.length).map(o=>`<div class="card"><h2>${esc(o.d.firstName)} <span class="mu">${esc(o.d.code)}</span></h2>${statTable(dStats(o.l))}</div>`).join('')}`;
+  }
+}
+async function addDelivery(ch,u){
+  const a=parseFloat($('#a_'+u).value);if(isNaN(a)||a<=0)return toast('Saisis un montant');
+  await db.collection('deliveries').add({delivererId:u,day:S.dday,amount:a,channel:ch,at:Date.now(),by:me.firstName});log('ajout courses',{u,ch,a});toast(CH[ch]+' '+eur(a)+' ✔');
+}
+async function delDelivery(id){if(confirm('Supprimer ?')){await db.collection('deliveries').doc(id).delete();log('suppr courses',{id})}}
+
+/* --- gérant : récap mensuel --- */
+function vRecap(){
+  const rows=S.users.filter(u=>u.role==='employee').map(u=>{
+    const ps=S.punches.filter(p=>p.uid===u.id&&p.end),ms=ps.reduce((t,p)=>t+dur(p),0);
+    return {n:u.firstName,pr:(u.code+' '+u.profile).trim(),ms,cost:ms/3600000*(u.rate||0),open:S.punches.some(p=>p.uid===u.id&&!p.end)};
+  });
+  const allD=dStats(S.deliveries);
+  const tc=rows.reduce((t,r)=>t+r.cost,0),td=allD.net;
+  $('#v').innerHTML=monthPicker()+`<div class="card"><h2>Salariés</h2><table><tr><th>Prénom</th><th class="r">Heures</th><th class="r">Coût</th></tr>
+  ${rows.map(r=>`<tr><td>${esc(r.n)} <span class="mu">${esc(r.pr)}</span>${r.open?' <span class="ko">⚠ pointage ouvert</span>':''}</td><td class="r">${fmtH(r.ms)}</td><td class="r">${eur(r.cost)}</td></tr>`).join('')}
+  <tr><th>Total</th><th></th><th class="r">${eur(tc)}</th></tr></table></div>
+  ${S.dels.map(d=>({d,l:S.deliveries.filter(x=>x.delivererId===d.id)})).filter(o=>o.l.length).map(o=>`<div class="card"><h2>${esc(o.d.firstName)}</h2>${statTable(dStats(o.l))}</div>`).join('')}
+  <div class="card"><b>Total général : ${eur(tc+td)}</b></div><p><button onclick="csv()">⬇ Export CSV</button></p>`;
+}
+function csv(){
+  const L=['Salarié;Jour;Arrivée;Départ;Heures'];
+  [...S.punches].sort((a,b)=>a.start.seconds-b.start.seconds).forEach(p=>L.push([userName(p.uid),p.day,fmtT(p.start.toDate()),fmtT(p.end&&p.end.toDate()),p.end?(dur(p)/3600000).toFixed(2).replace('.',','):''].join(';')));
+  const a=document.createElement('a');a.href=URL.createObjectURL(new Blob(['﻿'+L.join('\n')],{type:'text/csv'}));a.download='pointages-'+S.ym+'.csv';a.click();
+}
+
+/* --- gérant : réglages --- */
+function vSet(){
+  $('#v').innerHTML=`<div class="card"><h2>Réglages</h2><label>E-mail de réception des rapports</label><input id="s_m" type="email" value="${esc(settings.managerEmail)}">
+  <label>Heure de fin du jour de service (par défaut 3)</label><input id="s_h" type="number" min="0" max="8" value="${settings.dayCutoffHour}">
+  <label>Commission Uber retirée (%)</label><input id="s_u" type="number" min="0" max="100" step="0.1" value="${uberPct()}">
+  <p class="mu">Un service commencé avant cette heure compte pour la veille. Les rapports partent à cette même heure.</p>
+  <p><button class="pri" onclick="saveSettings()">Enregistrer</button></p></div>
+  <div class="card"><h2>Rapport de 3h</h2><p class="mu">Aperçu du rapport du jour de service en cours (l’envoi automatique se fait par e-mail à ${esc(settings.managerEmail)||'—'}).</p><p><button onclick="reportPreview()">Voir l’aperçu</button></p></div>
+  <div class="card"><h2>Mon mot de passe</h2><input id="s_p" type="password" placeholder="Nouveau mot de passe"><p><button onclick="changePw()">Changer</button></p></div>`;
+}
+function reportPreview(){
+  const day=dayKey(new Date()),ps=S.punches.filter(p=>p.day===day),ds=S.deliveries.filter(x=>x.day===day);
+  let tc=0,td=0;
+  const er=S.users.filter(u=>u.role==='employee').map(u=>{const m=ps.filter(p=>p.uid===u.id);if(!m.length)return'';const ms=m.filter(p=>p.end).reduce((t,p)=>t+dur(p),0),c=ms/3600000*(u.rate||0);tc+=c;
+    return `<tr><td>${esc(u.firstName)}</td><td>${fmtH(ms)}</td><td class="r">${eur(c)}</td><td class="mu">${m.map(p=>fmtT(p.start.toDate())+'→'+(p.end?fmtT(p.end.toDate()):'⚠ non pointée')).join(', ')}</td></tr>`}).join('');
+  const dr=S.dels.map(d=>{const m=ds.filter(x=>x.delivererId===d.id);if(!m.length)return'';const a=dStats(m).net;td+=a;return `<tr><td>${esc(d.firstName)}</td><td>${m.length} course(s)</td><td class="r">${eur(a)}</td></tr>`}).join('');
+  $('#dlg').innerHTML=`<h2>Rapport du ${fmtD(day)}</h2><table>${er||'<tr><td class="mu">Aucun pointage</td></tr>'}</table><h2 style="margin-top:12px">Livreurs</h2><table>${dr||'<tr><td class="mu">Aucune course</td></tr>'}</table><p><b>Total : ${eur(tc+td)}</b></p><button onclick="$('#dlg').close()">Fermer</button>`;
+  $('#dlg').showModal();
+}
+async function saveSettings(){
+  settings.managerEmail=$('#s_m').value.trim();settings.dayCutoffHour=parseInt($('#s_h').value)||3;settings.uberRate=parseFloat($('#s_u').value);if(isNaN(settings.uberRate))settings.uberRate=36;
+  await db.collection('settings').doc('main').update(settings);log('réglages',settings);toast('Enregistré ✔');
+}
+async function changePw(){try{await auth.currentUser.updatePassword($('#s_p').value);toast('Mot de passe changé ✔')}catch(e){toast('Reconnecte-toi puis réessaie ('+e.code+')')}}
+
+if('serviceWorker' in navigator)navigator.serviceWorker.register('sw.js');
+</script>
+</body>
+</html>
