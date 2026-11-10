@@ -91,7 +91,7 @@ function renderLogin(setup){
   $('#app').innerHTML=`<div class="card"><h2>${setup?'Première installation — compte administrateur':'Connexion'}</h2>
   <label>Prénom</label><input id="l_n" autocomplete="username" autocapitalize="words">
   <label>Mot de passe${setup?' (6 caractères min.)':''}</label><input id="l_p" type="password" autocomplete="current-password">
-  ${setup?'<label>E-mail de réception des rapports (gérant)</label><input id="l_m" type="email">':''}
+  ${setup?'<label>E-mail pour recevoir les rapports (facultatif)</label><input id="l_m" type="email" placeholder="à renseigner plus tard dans Réglages">':''}
   <p><button class="pri" style="width:100%" onclick="${setup?'doSetup()':'doLogin()'}">${setup?'Créer le compte admin':'Se connecter'}</button></p>
   <p class="mu" style="text-align:center"><a href="#" style="color:var(--gold)" onclick="renderInvite();return false">J’ai reçu une invitation (première connexion)</a></p>
   <p class="mu" style="text-align:center"><a href="#" style="color:var(--mu)" onclick="renderLogin(${!setup});return false">${setup?'← Retour':'Première installation (admin) ?'}</a></p></div>`;
@@ -137,7 +137,7 @@ async function doLogin(){
 }
 async function doSetup(){
   const n=$('#l_n').value.trim(),p=$('#l_p').value,m=$('#l_m').value.trim();
-  if(!n||p.length<6||!m)return toast('Remplis tout (mot de passe 6 car. min.)');
+  if(!n||p.length<6)return toast('Prénom et mot de passe (6 caractères min.) requis');
   try{
     busy=true;const c=await auth.createUserWithEmailAndPassword(emailOf(n),p);
     await db.collection('users').doc(c.user.uid).set({role:'admin',firstName:n,code:'',profile:'Administrateur',rate:0,active:true});
@@ -377,7 +377,7 @@ function csv(){
 
 /* --- gérant : réglages --- */
 function vSet(){
-  $('#v').innerHTML=`<div class="card"><h2>Réglages</h2><label>E-mail de réception des rapports</label><input id="s_m" type="email" value="${esc(settings.managerEmail)}">
+  $('#v').innerHTML=`<div class="card"><h2>Réglages</h2><label>E-mail de réception des rapports (celui du gérant, par exemple)</label><input id="s_m" type="email" value="${esc(settings.managerEmail)}">
   <label>Heure de fin du jour de service (par défaut 3)</label><input id="s_h" type="number" min="0" max="8" value="${settings.dayCutoffHour}">
   <label>Commission Uber retirée (%)</label><input id="s_u" type="number" min="0" max="100" step="0.1" value="${uberPct()}">
   <p class="mu">Un service commencé avant cette heure compte pour la veille. Les rapports partent à cette même heure.</p>
