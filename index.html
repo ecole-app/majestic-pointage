@@ -8,26 +8,29 @@
 <link rel="icon" href="icon.svg">
 <title>Pointage Majestic</title>
 <style>
-:root{--bg:#14110f;--card:#211c18;--line:#3a322b;--tx:#f3ede4;--mu:#a39886;--gold:#e8a93b;--ok:#4caf7a;--ko:#e5604d}
+:root{--inp:#2b241f;--bg:#14110f;--card:#211c18;--line:#3a322b;--tx:#f3ede4;--mu:#a39886;--gold:#e8a93b;--ok:#4caf7a;--ko:#e5604d}
+[data-theme=light]{--inp:#efe8dc;--bg:#f6f1e9;--card:#ffffff;--line:#ddd3c4;--tx:#1d1712;--mu:#7a6f60;--gold:#b87a0d}
+[data-theme=light] button.pri,[data-theme=light] nav button.on{color:#fff}
+#themeBtn{width:auto;padding:6px 10px;font-size:16px;margin-left:8px}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:16px/1.4 system-ui,sans-serif;padding-bottom:40px}
 header{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg);z-index:5}
 header b{color:var(--gold)}main{max-width:760px;margin:0 auto;padding:16px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;margin-bottom:12px}
-input,select,button{font:inherit;color:var(--tx);background:#2b241f;border:1px solid var(--line);border-radius:10px;padding:10px 12px;width:100%}
+input,select,button{font:inherit;color:var(--tx);background:var(--inp);border:1px solid var(--line);border-radius:10px;padding:10px 12px;width:100%}
 button{cursor:pointer;width:auto}button.pri{background:var(--gold);color:#14110f;font-weight:700;border:0}
 button.big{width:100%;padding:22px;font-size:22px;border-radius:16px}button.ko{background:var(--ko);color:#fff;border:0}button.sm{padding:5px 9px;font-size:13px}
 label{display:block;color:var(--mu);font-size:13px;margin:10px 0 4px}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.row>*{flex:1}
 nav{display:flex;gap:6px;overflow-x:auto;margin-bottom:12px}nav button{white-space:nowrap}nav button.on{background:var(--gold);color:#14110f;border:0;font-weight:700}
 table{width:100%;border-collapse:collapse;font-size:14px}td,th{padding:7px 4px;border-bottom:1px solid var(--line);text-align:left}th{color:var(--mu);font-weight:500}
 .mu{color:var(--mu);font-size:13px}.ok{color:var(--ok)}.ko{color:var(--ko)}.r{text-align:right}h2{margin:4px 0 10px;font-size:18px}
-dialog{background:var(--card);color:var(--tx);border:1px solid var(--line);border-radius:14px;width:min(420px,92vw)}dialog::backdrop{background:#000a}
+dialog{background:var(--card);color:var(--tx);border:1px solid var(--line);border-radius:14px;width:min(420px,92vw)}dialog::backdrop{background:#0008}
 .clock{font-size:44px;text-align:center;font-weight:700;margin:6px 0}#msg{position:fixed;bottom:12px;left:12px;right:12px;text-align:center;z-index:9}
-#msg span{background:#000;border:1px solid var(--gold);padding:8px 14px;border-radius:10px;display:inline-block}
+#msg span{background:var(--card);color:var(--tx);border:1px solid var(--gold);padding:8px 14px;border-radius:10px;display:inline-block}
 .pw{position:relative}.pw input{padding-right:48px}.pw button{position:absolute;right:4px;top:50%;transform:translateY(-50%);width:auto;background:none;border:0;padding:6px 10px;font-size:18px}
 </style>
 </head>
 <body>
-<header><b>🕒 Pointage Majestic</b><span id="who" class="mu"></span></header>
+<header><b>🕒 Pointage Majestic</b><span><span id="who" class="mu"></span><button id="themeBtn" onclick="toggleTheme()" aria-label="Mode clair / sombre">☀️</button></span></header>
 <main id="app"></main>
 <dialog id="dlg"></dialog>
 <div id="msg"></div>
@@ -37,6 +40,17 @@ dialog{background:var(--card);color:var(--tx);border:1px solid var(--line);borde
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 <script src="firebase-config.js"></script>
 <script>
+/* thème clair / sombre */
+(function(){
+  let t=null;try{t=localStorage.getItem('pm-theme')}catch(e){}
+  if(!t)t=window.matchMedia&&matchMedia('(prefers-color-scheme: light)').matches?'light':'dark';
+  window.setTheme=function(x,save){t=x;document.documentElement.dataset.theme=x;
+    const m=document.querySelector('meta[name=theme-color]');if(m)m.content=x==='light'?'#f6f1e9':'#14110f';
+    const b=document.getElementById('themeBtn');if(b)b.textContent=x==='light'?'🌙':'☀️';
+    if(save){try{localStorage.setItem('pm-theme',x)}catch(e){}}};
+  window.toggleTheme=()=>setTheme(t==='light'?'dark':'light',true);
+  document.addEventListener('DOMContentLoaded',()=>setTheme(t));setTheme(t);
+})();
 firebase.initializeApp(FIREBASE_CONFIG);
 const auth=firebase.auth(), db=firebase.firestore(), SRV=firebase.firestore.FieldValue.serverTimestamp, TS=firebase.firestore.Timestamp;
 const $=s=>document.querySelector(s), pad=n=>String(n).padStart(2,'0');
@@ -277,7 +291,7 @@ function shareInvite(id,fallback){
   const i=S.invites.find(x=>x.id===id)||fallback||{};
   const msg=`Salut ${i.firstName||''}, voici ton invitation Pointage Majestic.\nCode : ${id}\nLien : ${inviteLink(id)}\nTon identifiant sera ton prénom ; tu choisis ton mot de passe à la première connexion.`;
   $('#dlg').innerHTML=`<h2>Invitation pour ${esc(i.firstName||'')}</h2><p class="mu">Envoie ce message au salarié :</p>
-  <textarea id="inv_t" rows="6" style="width:100%;background:#2b241f;color:var(--tx);border:1px solid var(--line);border-radius:10px;padding:10px">${esc(msg)}</textarea>
+  <textarea id="inv_t" rows="6" style="width:100%;background:var(--inp);color:var(--tx);border:1px solid var(--line);border-radius:10px;padding:10px">${esc(msg)}</textarea>
   <div class="row" style="margin-top:12px"><button class="pri" onclick="copyInv()">Copier</button><a href="https://wa.me/?text=${encodeURIComponent(msg)}" target="_blank" rel="noopener"><button style="width:100%">WhatsApp</button></a><button onclick="$('#dlg').close()">Fermer</button></div>`;
   $('#dlg').showModal();
 }
