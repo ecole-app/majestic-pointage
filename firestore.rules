@@ -2,20 +2,24 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     function signedIn() { return request.auth != null; }
-    function isManager() {
-      return signedIn() && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'manager';
-    }
+    function myRole() { return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role; }
+    function isManager() { return signedIn() && myRole() in ['manager', 'admin']; }
+    function isAdmin()   { return signedIn() && myRole() == 'admin'; }
     function noSettingsYet() { return !exists(/databases/$(database)/documents/settings/main); }
 
     match /users/{uid} {
       allow read: if signedIn() && (request.auth.uid == uid || isManager());
-      allow create: if isManager()
-        || (request.auth.uid == uid && request.resource.data.role == 'manager' && noSettingsYet())
-        // salarié invité : l'invitation doit exister, être inutilisée et correspondre au prénom
-        || (request.auth.uid == uid && request.resource.data.role == 'employee'
+      // 1re installation : le compte créé est l'administrateur
+      allow create: if isAdmin()
+        || (request.auth.uid == uid && request.resource.data.role == 'admin' && noSettingsYet())
+        // salarié ou gérant invité : l'invitation doit exister, être inutilisée, et correspondre au prénom et au rôle
+        || (request.auth.uid == uid && request.resource.data.role in ['employee', 'manager']
+            && request.resource.data.role == get(/databases/$(database)/documents/invites/$(request.resource.data.inviteToken)).data.role
             && get(/databases/$(database)/documents/invites/$(request.resource.data.inviteToken)).data.used == false
             && get(/databases/$(database)/documents/invites/$(request.resource.data.inviteToken)).data.firstName == request.resource.data.firstName);
-      allow update, delete: if isManager();
+      allow update: if isAdmin()
+        || (isManager() && resource.data.role != 'admin' && request.resource.data.role == resource.data.role);
+      allow delete: if isAdmin();
     }
     match /settings/main {
       allow read: if signedIn();
@@ -42,6 +46,11 @@ service cloud.firestore {
       allow update: if isManager()
         || (signedIn() && resource.data.used == false
             && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['used','usedBy']));
+    }
+    match /tickets/{id} {
+      allow read: if isAdmin();
+      allow create: if isManager();
+      allow update, delete: if isAdmin();
     }
     match /deliverers/{id} { allow read, write: if isManager(); }
     match /deliveries/{id} { allow read, write: if isManager(); }

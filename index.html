@@ -39,8 +39,9 @@ dialog{background:var(--card);color:var(--tx);border:1px solid var(--line);borde
 firebase.initializeApp(FIREBASE_CONFIG);
 const auth=firebase.auth(), db=firebase.firestore(), SRV=firebase.firestore.FieldValue.serverTimestamp, TS=firebase.firestore.Timestamp;
 const $=s=>document.querySelector(s), pad=n=>String(n).padStart(2,'0');
+const isMgr=()=>!!me&&(me.role==='manager'||me.role==='admin');
 let busy=false, me=null, settings={dayCutoffHour:3,managerEmail:''}, unsubs=[];
-let S={tab:'punch',ym:'',users:[],dels:[],punches:[],deliveries:[],invites:[]};
+let S={tab:'punch',ym:'',users:[],dels:[],punches:[],deliveries:[],invites:[],tickets:[],logs:[]};
 
 /* ---------- utilitaires ---------- */
 const slug=s=>s.trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-z0-9]/g,'');
@@ -73,19 +74,19 @@ auth.onAuthStateChanged(async u=>{
     me={id:u.uid,...us.data()};
   }catch(e){toast('Erreur de chargement : '+e.message);return}
   $('#who').innerHTML=esc(me.firstName)+' · <a href="#" onclick="logout();return false" style="color:var(--gold)">quitter</a>';
-  S.ym=curYM();S.tab=me.role==='manager'?'punch':'mine';
+  S.ym=curYM();S.tab=isMgr()?'punch':'mine';
   listen();
 });
 const logout=()=>auth.signOut();
 
 function renderLogin(setup){
-  $('#app').innerHTML=`<div class="card"><h2>${setup?'Première installation — compte gérant':'Connexion'}</h2>
+  $('#app').innerHTML=`<div class="card"><h2>${setup?'Première installation — compte administrateur':'Connexion'}</h2>
   <label>Prénom</label><input id="l_n" autocomplete="username" autocapitalize="words">
   <label>Mot de passe${setup?' (6 caractères min.)':''}</label><input id="l_p" type="password" autocomplete="current-password">
-  ${setup?'<label>E-mail du gérant (réception des rapports)</label><input id="l_m" type="email">':''}
-  <p><button class="pri" style="width:100%" onclick="${setup?'doSetup()':'doLogin()'}">${setup?'Créer le compte gérant':'Se connecter'}</button></p>
+  ${setup?'<label>E-mail de réception des rapports (gérant)</label><input id="l_m" type="email">':''}
+  <p><button class="pri" style="width:100%" onclick="${setup?'doSetup()':'doLogin()'}">${setup?'Créer le compte admin':'Se connecter'}</button></p>
   <p class="mu" style="text-align:center"><a href="#" style="color:var(--gold)" onclick="renderInvite();return false">J’ai reçu une invitation (première connexion)</a></p>
-  <p class="mu" style="text-align:center"><a href="#" style="color:var(--mu)" onclick="renderLogin(${!setup});return false">${setup?'← Retour':'Première installation du gérant ?'}</a></p></div>`;
+  <p class="mu" style="text-align:center"><a href="#" style="color:var(--mu)" onclick="renderLogin(${!setup});return false">${setup?'← Retour':'Première installation (admin) ?'}</a></p></div>`;
 }
 const INV_ALPHA='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const newToken=()=>Array.from(crypto.getRandomValues(new Uint8Array(8)),b=>INV_ALPHA[b%INV_ALPHA.length]).join('');
@@ -117,7 +118,7 @@ async function acceptInvite(){
   let cred;
   try{
     busy=true;cred=await auth.createUserWithEmailAndPassword(emailOf(INV.firstName),p);
-    await db.collection('users').doc(cred.user.uid).set({role:'employee',firstName:INV.firstName,code:INV.code,profile:INV.profile,rate:INV.rate||0,active:true,inviteToken:INV.id});
+    await db.collection('users').doc(cred.user.uid).set({role:INV.role||'employee',firstName:INV.firstName,code:INV.code,profile:INV.profile,rate:INV.rate||0,active:true,inviteToken:INV.id});
     await db.collection('invites').doc(INV.id).update({used:true,usedBy:cred.user.uid});
     busy=false;location.reload();
   }catch(e){busy=false;toast('Impossible : '+e.message);try{await auth.currentUser?.delete()}catch(_){}}
@@ -131,7 +132,7 @@ async function doSetup(){
   if(!n||p.length<6||!m)return toast('Remplis tout (mot de passe 6 car. min.)');
   try{
     busy=true;const c=await auth.createUserWithEmailAndPassword(emailOf(n),p);
-    await db.collection('users').doc(c.user.uid).set({role:'manager',firstName:n,code:'',profile:'Gérant',rate:0,active:true});
+    await db.collection('users').doc(c.user.uid).set({role:'admin',firstName:n,code:'',profile:'Administrateur',rate:0,active:true});
     await db.collection('settings').doc('main').set({managerEmail:m,dayCutoffHour:3});
     busy=false;location.reload();
   }catch(e){busy=false;toast('Impossible : '+e.message);try{await auth.currentUser?.delete()}catch(_){}}
@@ -139,12 +140,16 @@ async function doSetup(){
 
 /* ---------- données temps réel ---------- */
 function listen(){
-  const isM=me.role==='manager';
+  const isM=isMgr();
   if(isM){
     unsubs.push(db.collection('users').onSnapshot(s=>{S.users=s.docs.map(d=>({id:d.id,...d.data()}));render()}));
     unsubs.push(db.collection('invites').onSnapshot(s=>{S.invites=s.docs.map(d=>({id:d.id,...d.data()}));if(S.tab==='team')render()}));
     unsubs.push(db.collection('deliverers').onSnapshot(s=>{S.dels=s.docs.map(d=>({id:d.id,...d.data()}));render()}));
     watchMonth();
+    if(me.role==='admin'){
+      unsubs.push(db.collection('tickets').onSnapshot(s=>{S.tickets=s.docs.map(d=>({id:d.id,...d.data()}));if(S.tab==='admin')render()}));
+      unsubs.push(db.collection('logs').orderBy('at','desc').limit(100).onSnapshot(s=>{S.logs=s.docs.map(d=>({id:d.id,...d.data()}));if(S.tab==='admin')render()}));
+    }
   }else{
     S.users=[me];
     unsubs.push(db.collection('punches').where('uid','==',me.id).onSnapshot(s=>{S.punches=s.docs.map(d=>({id:d.id,...d.data()}));render()}));
@@ -163,10 +168,11 @@ function watchMonth(){
 /* ---------- rendu ---------- */
 function render(){
   if(!me)return;
-  if(me.role==='manager'){
+  if(isMgr()){
     const tabs=[['punch','Pointages'],['team','Équipe'],['deliv','Livraisons'],['recap','Récap'],['set','Réglages']];
+    if(me.role==='admin')tabs.push(['admin','🛠 Admin']);
     $('#app').innerHTML=`<nav>${tabs.map(([k,l])=>`<button class="${S.tab===k?'on':''}" onclick="S.tab='${k}';render()">${l}</button>`).join('')}</nav><div id="v"></div>`;
-    ({punch:vPunch,team:vTeam,deliv:vDeliv,recap:vRecap,set:vSet})[S.tab]();
+    ({punch:vPunch,team:vTeam,deliv:vDeliv,recap:vRecap,set:vSet,admin:vAdmin})[S.tab]();
   }else{vMine()}
 }
 const monthPicker=()=>`<div class="row" style="margin-bottom:10px"><input type="month" value="${S.ym}" onchange="S.ym=this.value||curYM();watchMonth();render()"></div>`;
@@ -234,16 +240,17 @@ async function delPunch(id){if(!confirm('Supprimer ce pointage ?'))return;const 
 function vTeam(){
   const emps=S.users.filter(u=>u.role==='employee'),dels=S.dels;
   $('#v').innerHTML=`<div class="card"><h2>Ajouter</h2>
-  <label>Type</label><select id="t_type" onchange="$('#t_rate').style.display=this.value==='employee'?'block':'none'"><option value="employee">Salarié (pointe lui-même, reçoit une invitation)</option><option value="deliverer">Livreur (le gérant saisit ses courses)</option></select>
+  <label>Type</label><select id="t_type" onchange="$('#t_rate').style.display=this.value==='employee'?'block':'none'"><option value="employee">Salarié (pointe lui-même, reçoit une invitation)</option>${me.role==='admin'?'<option value="manager">Gérant (accès gestion, par invitation)</option>':''}<option value="deliverer">Livreur (le gérant saisit ses courses)</option></select>
   <label>Prénom</label><input id="t_n">  <div class="row"><div><label>Code profil</label><input id="t_c" inputmode="numeric" placeholder="1279"></div><div><label>Profil</label><input id="t_pr" placeholder="Employé polyvalent"></div><div id="t_rate"><label>Taux horaire €</label><input id="t_r" type="number" step="0.01" placeholder="12.00"></div></div>
   <p><button class="pri" onclick="addMember()">Créer / envoyer l’invitation</button></p></div>
   ${S.invites.filter(i=>!i.used).length?`<div class="card"><h2>Invitations en attente</h2>${S.invites.filter(i=>!i.used).map(i=>`<div class="row" style="margin-bottom:6px"><span style="flex:2"><b>${esc(i.firstName)}</b> <span class="mu">${esc(i.profile)}</span></span><button class="sm" onclick="shareInvite('${i.id}')">Envoyer</button><button class="sm" onclick="delInvite('${i.id}')">✕</button></div>`).join('')}</div>`:''}
   <div class="card"><h2>Salariés</h2><table><tr><th>Prénom</th><th>Profil</th><th class="r">€/h</th><th></th></tr>
   ${emps.map(u=>`<tr style="${u.active===false?'opacity:.45':''}"><td>${esc(u.firstName)}</td><td>${esc(u.code)} ${esc(u.profile)}</td><td class="r">${u.rate??0}</td><td class="r"><button class="sm" onclick="editMember('users','${u.id}')">✎</button></td></tr>`).join('')||'<tr><td colspan=4 class="mu">Aucun</td></tr>'}</table></div>
+  ${me.role==='admin'&&S.users.some(u=>u.role==='manager')?`<div class="card"><h2>Gérants</h2><table>${S.users.filter(u=>u.role==='manager').map(u=>`<tr style="${u.active===false?'opacity:.45':''}"><td>${esc(u.firstName)}</td><td class="r"><button class="sm" onclick="editMember('users','${u.id}')">✎</button></td></tr>`).join('')}</table></div>`:''}
   <div class="card"><h2>Livreurs</h2><table>${dels.map(u=>`<tr style="${u.active===false?'opacity:.45':''}"><td>${esc(u.firstName)}</td><td>${esc(u.code)} ${esc(u.profile)}</td><td class="r"><button class="sm" onclick="editMember('deliverers','${u.id}')">✎</button></td></tr>`).join('')||'<tr><td class="mu">Aucun</td></tr>'}</table></div>`;
 }
 async function addMember(){
-  const type=$('#t_type').value,n=$('#t_n').value.trim(),code=$('#t_c').value.trim(),pr=$('#t_pr').value.trim()||(type==='deliverer'?'Livreur':'Employé polyvalent'),rate=parseFloat($('#t_r').value)||0;
+  const type=$('#t_type').value,n=$('#t_n').value.trim(),code=$('#t_c').value.trim(),pr=$('#t_pr').value.trim()||(type==='deliverer'?'Livreur':type==='manager'?'Gérant':'Employé polyvalent'),rate=parseFloat($('#t_r').value)||0;
   if(!n)return toast('Prénom requis');
   if(S.users.concat(S.dels).some(u=>slug(u.firstName)===slug(n)))return toast('Ce prénom existe déjà (ajoute une initiale)');
   try{
@@ -251,7 +258,7 @@ async function addMember(){
     else{
       if(S.invites.some(i=>!i.used&&slug(i.firstName)===slug(n)))return toast('Une invitation existe déjà pour ce prénom');
       const id=newToken();
-      await db.collection('invites').doc(id).set({firstName:n,code,profile:pr,rate,used:false,createdAt:SRV()});
+      await db.collection('invites').doc(id).set({firstName:n,code,profile:pr,rate:type==='manager'?0:rate,role:type==='manager'?'manager':'employee',used:false,createdAt:SRV()});
       log('invitation',{n,code});toast('Invitation créée ✔');return shareInvite(id,{firstName:n});
     }
     log('création '+type,{n,code});toast('Créé ✔');vTeam();
@@ -314,6 +321,32 @@ async function addDelivery(ch,u){
 }
 async function delDelivery(id){if(confirm('Supprimer ?')){await db.collection('deliveries').doc(id).delete();log('suppr courses',{id})}}
 
+/* --- admin : bugs / modifs à faire + journal --- */
+const T_ST={todo:'À faire',doing:'En cours',done:'Fait'},T_TY={bug:'🐞 Bug',mod:'✨ Modif'};
+S.asub='tickets';
+function vAdmin(){
+  const sub=S.asub;
+  const head=`<nav><button class="${sub==='tickets'?'on':''}" onclick="S.asub='tickets';render()">🐞 Bugs & modifs (${S.tickets.filter(t=>t.status!=='done').length})</button><button class="${sub==='logs'?'on':''}" onclick="S.asub='logs';render()">📜 Journal</button></nav>`;
+  if(sub==='tickets'){
+    const order={doing:0,todo:1,done:2},list=[...S.tickets].sort((a,b)=>order[a.status]-order[b.status]||(b.at||0)-(a.at||0));
+    $('#v').innerHTML=head+`<div class="card"><h2>Ajouter</h2><div class="row"><select id="k_ty"><option value="bug">🐞 Bug</option><option value="mod">✨ Modification</option></select></div>
+    <label>Titre</label><input id="k_ti"><label>Détail</label><input id="k_de" placeholder="Que se passe-t-il ? Ce que tu veux ?">
+    <p><button class="pri" onclick="addTicket('k')">Ajouter</button></p></div>
+    ${list.map(t=>`<div class="card" style="${t.status==='done'?'opacity:.5':''}"><div class="row"><b style="flex:3">${T_TY[t.type]||''} ${esc(t.title)}</b><span class="mu" style="text-align:right">${esc(t.by||'')}</span></div>
+    ${t.detail?`<p class="mu">${esc(t.detail)}</p>`:''}<div class="row">${Object.keys(T_ST).map(k=>`<button class="sm ${t.status===k?'pri':''}" onclick="setTicket('${t.id}','${k}')">${T_ST[k]}</button>`).join('')}<button class="sm ko" onclick="delTicket('${t.id}')">✕</button></div></div>`).join('')||'<div class="card mu">Rien à traiter 🎉</div>'}`;
+  }else{
+    $('#v').innerHTML=head+`<div class="card"><table><tr><th>Quand</th><th>Qui</th><th>Action</th></tr>${S.logs.map(l=>{const d=l.at&&l.at.toDate?l.at.toDate():null;
+      return `<tr><td class="mu">${d?fmtDT(d):''}</td><td>${esc(l.by)}</td><td>${esc(l.action)} <span class="mu">${esc(l.detail?JSON.stringify(l.detail).slice(0,90):'')}</span></td></tr>`}).join('')||'<tr><td class="mu">Journal vide</td></tr>'}</table></div>`;
+  }
+}
+async function addTicket(p){
+  const title=$('#'+p+'_ti').value.trim();if(!title)return toast('Titre requis');
+  await db.collection('tickets').add({type:$('#'+p+'_ty')?$('#'+p+'_ty').value:'bug',title,detail:$('#'+p+'_de').value.trim(),status:'todo',by:me.firstName,at:Date.now()});
+  toast('Enregistré ✔');if(p==='k')render();else{$('#'+p+'_ti').value='';$('#'+p+'_de').value=''}
+}
+async function setTicket(id,st){await db.collection('tickets').doc(id).update({status:st})}
+async function delTicket(id){if(confirm('Supprimer ?'))await db.collection('tickets').doc(id).delete()}
+
 /* --- gérant : récap mensuel --- */
 function vRecap(){
   const rows=S.users.filter(u=>u.role==='employee').map(u=>{
@@ -342,6 +375,7 @@ function vSet(){
   <p class="mu">Un service commencé avant cette heure compte pour la veille. Les rapports partent à cette même heure.</p>
   <p><button class="pri" onclick="saveSettings()">Enregistrer</button></p></div>
   <div class="card"><h2>Rapport de 3h</h2><p class="mu">Aperçu du rapport du jour de service en cours (l’envoi automatique se fait par e-mail à ${esc(settings.managerEmail)||'—'}).</p><p><button onclick="reportPreview()">Voir l’aperçu</button></p></div>
+  ${me.role!=='admin'?`<div class="card"><h2>🐞 Signaler un bug / demander une modif</h2><label>Titre</label><input id="r_ti"><label>Détail</label><input id="r_de"><p><button onclick="addTicket('r')">Envoyer à l’admin</button></p></div>`:''}
   <div class="card"><h2>Mon mot de passe</h2><input id="s_p" type="password" placeholder="Nouveau mot de passe"><p><button onclick="changePw()">Changer</button></p></div>`;
 }
 function reportPreview(){
