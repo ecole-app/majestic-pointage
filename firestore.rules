@@ -5,6 +5,11 @@ service cloud.firestore {
     function myRole() { return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role; }
     function isManager() { return signedIn() && myRole() in ['manager', 'admin']; }
     function isAdmin()   { return signedIn() && myRole() == 'admin'; }
+    // Borne de pointage : si une borne est définie, seuls les pointages portant son jeton sont acceptés
+    function kioskOk(dev) {
+      return !exists(/databases/$(database)/documents/settings/kiosk)
+        || dev == get(/databases/$(database)/documents/settings/kiosk).data.token;
+    }
     function noSettingsYet() { return !exists(/databases/$(database)/documents/settings/main); }
 
     match /users/{uid} {
@@ -21,6 +26,7 @@ service cloud.firestore {
         || (isManager() && resource.data.role != 'admin' && request.resource.data.role == resource.data.role);
       allow delete: if isAdmin();
     }
+    match /settings/kiosk { allow read, write: if isManager(); }   // jeton jamais lisible par les salariés
     match /settings/main {
       allow read: if signedIn();
       allow create: if signedIn() && noSettingsYet();
@@ -32,12 +38,14 @@ service cloud.firestore {
       allow create: if isManager()
         || (signedIn() && request.resource.data.uid == request.auth.uid
             && request.resource.data.end == null
-            && request.resource.data.start == request.time);
+            && request.resource.data.start == request.time
+            && kioskOk(request.resource.data.get('device', '')));
       // le salarié pointe son départ (uniquement le champ "end", horodatage serveur)
       allow update: if isManager()
         || (signedIn() && resource.data.uid == request.auth.uid && resource.data.end == null
-            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['end'])
-            && request.resource.data.end == request.time);
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['end', 'endDevice'])
+            && request.resource.data.end == request.time
+            && kioskOk(request.resource.data.get('endDevice', '')));
       allow delete: if isManager();
     }
     match /invites/{id} {

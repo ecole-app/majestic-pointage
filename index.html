@@ -56,7 +56,7 @@ const auth=firebase.auth(), db=firebase.firestore(), SRV=firebase.firestore.Fiel
 const $=s=>document.querySelector(s), pad=n=>String(n).padStart(2,'0');
 const isMgr=()=>!!me&&(me.role==='manager'||me.role==='admin');
 let busy=false, me=null, settings={dayCutoffHour:3,managerEmail:''}, unsubs=[];
-let S={tab:'punch',ym:'',users:[],dels:[],punches:[],deliveries:[],invites:[],tickets:[],logs:[]};
+let S={tab:'punch',ym:'',users:[],dels:[],punches:[],deliveries:[],invites:[],tickets:[],logs:[],kiosk:null};
 
 /* ---------- utilitaires ---------- */
 const slug=s=>s.trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-z0-9]/g,'');
@@ -103,7 +103,7 @@ function addEyes(root){root.querySelectorAll('input[type=password]').forEach(i=>
 ['#app','#dlg'].forEach(s=>new MutationObserver(()=>addEyes($(s))).observe($(s),{childList:true,subtree:true}));
 function renderLogin(setup){
   $('#app').innerHTML=`<div class="card"><h2>${setup?'Première installation — compte administrateur':'Connexion'}</h2>
-  <label>Prénom</label><input id="l_n" autocomplete="username" autocapitalize="words">
+  <label>Prénom</label><input id="l_n" autocomplete="${KIOSK()?'off':'username'}" autocapitalize="words">
   <label>Mot de passe${setup?' (6 caractères min.)':''}</label><input id="l_p" type="password" autocomplete="current-password">
   ${setup?'<label>E-mail pour recevoir les rapports (facultatif)</label><input id="l_m" type="email" placeholder="à renseigner plus tard dans Réglages">':''}
   <p><button class="pri" style="width:100%" onclick="${setup?'doSetup()':'doLogin()'}">${setup?'Créer le compte admin':'Se connecter'}</button></p>
@@ -168,6 +168,7 @@ function listen(){
     unsubs.push(db.collection('invites').onSnapshot(s=>{S.invites=s.docs.map(d=>({id:d.id,...d.data()}));if(S.tab==='team')render()}));
     unsubs.push(db.collection('deliverers').onSnapshot(s=>{S.dels=s.docs.map(d=>({id:d.id,...d.data()}));render()}));
     watchMonth();
+    unsubs.push(db.collection('settings').doc('kiosk').onSnapshot(d=>{S.kiosk=d.exists?d.data():null;if(S.tab==='set')render()}));
     if(me.role==='admin'){
       unsubs.push(db.collection('tickets').onSnapshot(s=>{S.tickets=s.docs.map(d=>({id:d.id,...d.data()}));if(S.tab==='admin')render()}));
       unsubs.push(db.collection('logs').orderBy('at','desc').limit(100).onSnapshot(s=>{S.logs=s.docs.map(d=>({id:d.id,...d.data()}));if(S.tab==='admin')render()}));
@@ -214,14 +215,32 @@ function vMine(){
   ${mine.map(p=>`<tr><td>${fmtD(p.day)}</td><td>${fmtT(p.start.toDate())}</td><td>${p.end?fmtT(p.end.toDate()):'<span class="ok">en cours</span>'}</td><td class="r">${p.end?fmtH(dur(p)):''}${p.corrected?' <span class="mu" title="corrigé par le gérant">✎</span>':''}</td></tr>`).join('')||'<tr><td colspan=4 class="mu">Rien ce mois-ci</td></tr>'}
   </table><p class="r"><b>Total : ${fmtH(total)}</b></p>
   <p class="mu">Une erreur ? Demande au gérant de corriger.</p></div>`;
-  clearInterval(tick);const c=()=>{const e=$('#clk');if(e)e.textContent=new Date().toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit',second:'2-digit'})};c();tick=setInterval(c,1000);
+  kioskIdle();clearInterval(tick);const c=()=>{const e=$('#clk');if(e)e.textContent=new Date().toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit',second:'2-digit'})};c();tick=setInterval(c,1000);
 }
 async function punchIn(){
-  try{await db.collection('punches').add({uid:me.id,day:dayKey(new Date()),start:SRV(),end:null});toast('Arrivée pointée ✔')}catch(e){toast('Erreur : '+e.message)}
+  try{await db.collection('punches').add({uid:me.id,day:dayKey(new Date()),start:SRV(),end:null,device:KIOSK()});toast('Arrivée pointée ✔');afterPunch()}catch(e){punchErr(e)}
 }
 async function punchOut(id){
-  try{await db.collection('punches').doc(id).update({end:SRV()});toast('Départ pointé ✔')}catch(e){toast('Erreur : '+e.message)}
+  try{await db.collection('punches').doc(id).update({end:SRV(),endDevice:KIOSK()});toast('Départ pointé ✔');afterPunch()}catch(e){punchErr(e)}
 }
+/* --- borne de pointage : un seul téléphone autorisé --- */
+const KIOSK=()=>{try{return localStorage.getItem('pm-kiosk')||''}catch(e){return ''}};
+async function setKiosk(){
+  const tok=newToken()+newToken();
+  try{localStorage.setItem('pm-kiosk',tok);if(localStorage.getItem('pm-kiosk')!==tok)throw 0}catch(e){return toast('Ce navigateur ne peut pas mémoriser la borne (navigation privée ?)')}
+  try{await db.collection('settings').doc('kiosk').set({token:tok,setBy:me.firstName,at:SRV()});log('borne de pointage activée',{});toast('Cet appareil est la borne ✔ Déconnecte-toi pour laisser les salariés pointer')}
+  catch(e){try{localStorage.removeItem('pm-kiosk')}catch(_){}toast('Erreur : '+e.message)}
+}
+async function unsetKiosk(){
+  if(!confirm('Autoriser le pointage depuis n’importe quel appareil ?'))return;
+  try{await db.collection('settings').doc('kiosk').delete();try{localStorage.removeItem('pm-kiosk')}catch(e){}log('borne de pointage désactivée',{});toast('Borne désactivée')}catch(e){toast('Erreur : '+e.message)}
+}
+function kioskIdle(){ // sur la borne : déconnexion automatique après 90 s d'inactivité
+  if(!KIOSK())return;const r=()=>{clearTimeout(kioskIdle.t);kioskIdle.t=setTimeout(()=>auth.signOut(),90000)};r();document.onpointerdown=r;
+}
+const afterPunch=()=>{if(KIOSK())setTimeout(()=>auth.signOut(),3000)};
+const punchErr=e=>toast(e.code==='permission-denied'?'Pointage possible uniquement depuis le téléphone du restaurant':'Erreur : '+e.message);
+
 
 /* --- gérant : pointages --- */
 function vPunch(){
@@ -396,6 +415,8 @@ function vSet(){
   <label>Commission Uber retirée (%)</label><input id="s_u" type="number" min="0" max="100" step="0.1" value="${uberPct()}">
   <p class="mu">Un service commencé avant cette heure compte pour la veille. Les rapports partent à cette même heure.</p>
   <p><button class="pri" onclick="saveSettings()">Enregistrer</button></p></div>
+  <div class="card"><h2>📱 Borne de pointage</h2><p class="mu">${S.kiosk?(S.kiosk.token===KIOSK()?'✅ Cet appareil est la borne : seuls les pointages faits ici sont acceptés.':'🔒 Une borne est définie sur un autre appareil : les salariés ne peuvent pointer que là.'):'Aucune borne : les salariés peuvent pointer depuis n’importe quel téléphone.'}</p>
+  <p class="row"><button class="pri" onclick="setKiosk()">${S.kiosk&&S.kiosk.token===KIOSK()?'Régénérer la borne':'Utiliser cet appareil comme borne'}</button>${S.kiosk?'<button onclick="unsetKiosk()">Désactiver</button>':''}</p></div>
   <div class="card"><h2>Rapport de 3h</h2><p class="mu">Aperçu du rapport du jour de service en cours (l’envoi automatique se fait par e-mail à ${esc(settings.managerEmail)||'—'}).</p><p><button onclick="reportPreview()">Voir l’aperçu</button></p></div>
   ${me.role!=='admin'?`<div class="card"><h2>🐞 Signaler un bug / demander une modif</h2><label>Titre</label><input id="r_ti"><label>Détail</label><input id="r_de"><p><button onclick="addTicket('r')">Envoyer à l’admin</button></p></div>`:''}
   <div class="card"><h2>Mon mot de passe</h2><input id="s_p" type="password" placeholder="Nouveau mot de passe"><p><button onclick="changePw()">Changer</button></p></div>`;
