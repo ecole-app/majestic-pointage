@@ -23,6 +23,7 @@ table{width:100%;border-collapse:collapse;font-size:14px}td,th{padding:7px 4px;b
 dialog{background:var(--card);color:var(--tx);border:1px solid var(--line);border-radius:14px;width:min(420px,92vw)}dialog::backdrop{background:#000a}
 .clock{font-size:44px;text-align:center;font-weight:700;margin:6px 0}#msg{position:fixed;bottom:12px;left:12px;right:12px;text-align:center;z-index:9}
 #msg span{background:#000;border:1px solid var(--gold);padding:8px 14px;border-radius:10px;display:inline-block}
+.pw{position:relative}.pw input{padding-right:48px}.pw button{position:absolute;right:4px;top:50%;transform:translateY(-50%);width:auto;background:none;border:0;padding:6px 10px;font-size:18px}
 </style>
 </head>
 <body>
@@ -79,6 +80,13 @@ auth.onAuthStateChanged(async u=>{
 });
 const logout=()=>auth.signOut();
 
+
+/* œil pour afficher/masquer les mots de passe */
+function addEyes(root){root.querySelectorAll('input[type=password]').forEach(i=>{
+  if(i.dataset.eye)return;i.dataset.eye=1;const w=document.createElement('div');w.className='pw';i.parentNode.insertBefore(w,i);w.appendChild(i);
+  const b=document.createElement('button');b.type='button';b.textContent='👁';b.title='Afficher / masquer';b.setAttribute('aria-label','Afficher le mot de passe');
+  b.onclick=()=>{const show=i.type==='password';i.type=show?'text':'password';b.textContent=show?'🙈':'👁'};w.appendChild(b)})}
+['#app','#dlg'].forEach(s=>new MutationObserver(()=>addEyes($(s))).observe($(s),{childList:true,subtree:true}));
 function renderLogin(setup){
   $('#app').innerHTML=`<div class="card"><h2>${setup?'Première installation — compte administrateur':'Connexion'}</h2>
   <label>Prénom</label><input id="l_n" autocomplete="username" autocapitalize="words">
@@ -125,7 +133,7 @@ async function acceptInvite(){
 }
 async function doLogin(){
   try{await auth.signInWithEmailAndPassword(emailOf($('#l_n').value),$('#l_p').value)}
-  catch(e){toast('Prénom ou mot de passe incorrect')}
+  catch(e){toast('Prénom ou mot de passe incorrect'+(e.code?' ('+e.code+')':''))}
 }
 async function doSetup(){
   const n=$('#l_n').value.trim(),p=$('#l_p').value,m=$('#l_m').value.trim();
